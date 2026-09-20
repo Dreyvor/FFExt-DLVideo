@@ -15,7 +15,14 @@
       <p class="status">Scanning this page…</p>
     </main>
     <footer>
-      <button id="refresh" type="button">Refresh</button>
+      <div class="selection-status">
+        <strong id="selection-summary">Select one video</strong>
+        <span id="selection-hint">Captions are optional</span>
+      </div>
+      <div class="footer-actions">
+        <button id="refresh" class="secondary" type="button">Refresh</button>
+        <button id="download-selected" type="button" disabled>Download selected</button>
+      </div>
     </footer>
     <script src="shared.js"></script>
     <script src="popup.js"></script>

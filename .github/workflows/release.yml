@@ -44,7 +44,7 @@ jobs:
           fi
 
           mkdir release-assets
-          archive_name="videodl-${build_stamp}.zip"
+          archive_name="FFExt-DLVideo-${build_stamp}.zip"
           cp "$source_archive" "release-assets/$archive_name"
           (
             cd release-assets
@@ -52,11 +52,11 @@ jobs:
           )
 
           tag="build-${build_stamp}"
-          title="VideoDL build ${build_date} (${build_stamp:9:2}:${build_stamp:11:2}:${build_stamp:13:2} UTC)"
+          title="FFExt-DLVideo build ${build_date} (${build_stamp:9:2}:${build_stamp:11:2}:${build_stamp:13:2} UTC)"
           checksum="$(cat "release-assets/$archive_name.sha256")"
 
           {
-            echo "Automated VideoDL build created on ${build_date} UTC."
+            echo "Automated FFExt-DLVideo build created on ${build_date} UTC."
             echo
             echo "SHA-256:"
             echo '```text'

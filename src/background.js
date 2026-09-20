@@ -5,6 +5,8 @@
   const drmProtectedTabs = new Set();
   const downloadsById = new Map();
   const downloadedByTab = new Map();
+  const downloadFailuresByTab = new Map();
+  const plannedFilenamesByTab = new Map();
 
   function markDrmProtected(tabId) {
     if (tabId >= 0) {
@@ -17,6 +19,14 @@
     return candidate.url;
   }
 
+  function activeDownloadUrls(tabId) {
+    return new Set(
+      [...downloadsById.values()]
+        .filter((download) => download.tabId === tabId)
+        .map((download) => download.url)
+    );
+  }
+
   function downloadedUrls(tabId) {
     if (!downloadedByTab.has(tabId)) {
       downloadedByTab.set(tabId, new Set());
@@ -26,7 +36,32 @@
 
   function markDownloaded(tabId, url) {
     downloadedUrls(tabId).add(url);
+    if (downloadFailuresByTab.has(tabId)) {
+      downloadFailuresByTab.get(tabId).delete(url);
+    }
     browser.runtime.sendMessage({ type: "downloadCompleted", tabId, url }).catch(() => {});
+  }
+
+  function markDownloadFailed(tabId, url, error) {
+    if (!downloadFailuresByTab.has(tabId)) {
+      downloadFailuresByTab.set(tabId, new Map());
+    }
+    const message = error || "The download could not be completed.";
+    downloadFailuresByTab.get(tabId).set(url, message);
+    browser.runtime.sendMessage({ type: "downloadFailed", tabId, url, error: message }).catch(() => {});
+  }
+
+  function clearTabState(tabId) {
+    mediaByTab.delete(tabId);
+    drmProtectedTabs.delete(tabId);
+    downloadedByTab.delete(tabId);
+    downloadFailuresByTab.delete(tabId);
+    plannedFilenamesByTab.delete(tabId);
+    for (const [downloadId, download] of downloadsById) {
+      if (download.tabId === tabId) {
+        downloadsById.delete(downloadId);
+      }
+    }
   }
 
   function mergeCandidates(tabId, candidates) {
@@ -48,10 +83,19 @@
 
       const normalised = {
         url: parsed.href,
-        title: String(candidate.title || "Video").trim().slice(0, 200),
-        type: String(candidate.type || "").trim().slice(0, 100),
         kind: candidate.kind === "vtt" ? "vtt" : "video"
       };
+      for (const field of ["title", "type", "language", "label", "suggestedName"]) {
+        if (typeof candidate[field] === "string" && candidate[field].trim()) {
+          normalised[field] = candidate[field].trim().slice(0, field === "title" ? 200 : 240);
+        }
+      }
+      for (const field of ["width", "height", "durationSeconds", "byteLength"]) {
+        const value = Number(candidate[field]);
+        if (Number.isFinite(value) && value >= 0) {
+          normalised[field] = value;
+        }
+      }
       const key = candidateKey(normalised);
       existing.set(key, { ...existing.get(key), ...normalised });
     }
@@ -72,35 +116,105 @@
 
     const drmProtected = drmProtectedTabs.has(tabId);
     const completed = downloadedByTab.get(tabId) || new Set();
+    const downloading = activeDownloadUrls(tabId);
+    const failures = downloadFailuresByTab.get(tabId) || new Map();
     const media = drmProtected ? [] : [...(mediaByTab.get(tabId) || new Map()).values()]
-      .map((candidate) => ({ ...candidate, downloaded: completed.has(candidate.url) }));
+      .map((candidate) => ({
+        ...candidate,
+        downloaded: completed.has(candidate.url),
+        downloading: downloading.has(candidate.url),
+        error: failures.get(candidate.url) || ""
+      }));
     return { drmProtected, media };
   }
 
-  async function downloadCandidate(tabId, url, title) {
+  async function startDownload(tabId, file) {
+    if (downloadFailuresByTab.has(tabId)) {
+      downloadFailuresByTab.get(tabId).delete(file.url);
+    }
+    const downloadId = await browser.downloads.download({
+      url: file.url,
+      filename: file.filename,
+      saveAs: false,
+      conflictAction: "uniquify"
+    });
+    downloadsById.set(downloadId, { tabId, url: file.url });
+
+    // Small VTT files may complete before the onChanged listener sees them.
+    try {
+      const [download] = await browser.downloads.search({ id: downloadId });
+      if (download && download.state === "complete") {
+        markDownloaded(tabId, file.url);
+        downloadsById.delete(downloadId);
+      }
+    } catch (_error) {
+      // The onChanged listener remains authoritative if the lookup is unavailable.
+    }
+    return downloadId;
+  }
+
+  async function downloadSet(tabId, videoUrl, vttUrls) {
     if (drmProtectedTabs.has(tabId)) {
-      throw new Error("DRM-protected media cannot be downloaded.");
+      return { error: "DRM-protected media cannot be downloaded.", results: [] };
     }
 
     const known = mediaByTab.get(tabId);
-    if (!known || !known.has(url)) {
-      throw new Error("The media URL is no longer available.");
+    const completed = downloadedByTab.get(tabId) || new Set();
+    const downloading = activeDownloadUrls(tabId);
+    const candidates = new Map(
+      [...(known || new Map()).entries()].map(([url, candidate]) => [url, {
+        ...candidate,
+        downloaded: completed.has(url),
+        downloading: downloading.has(url)
+      }])
+    );
+    const validation = VideoDL.validateDownloadSet(candidates, videoUrl, vttUrls);
+    if (validation.error) {
+      return { error: validation.error, results: [] };
     }
 
-    const parsed = new URL(url);
-    const pathName = decodeURIComponent(parsed.pathname.split("/").pop() || "");
-    const extensionMatch = pathName.match(/\.[a-z0-9]{2,5}$/i);
-    const filename = `${VideoDL.safeFilename(title || pathName)}${extensionMatch && !String(title).endsWith(extensionMatch[0]) ? extensionMatch[0] : ""}`;
-    const downloadId = await browser.downloads.download({ url, filename, saveAs: true });
-    downloadsById.set(downloadId, { tabId, url });
-
-    // Small VTT files may complete before the onChanged listener sees them.
-    const [download] = await browser.downloads.search({ id: downloadId });
-    if (download && download.state === "complete") {
-      markDownloaded(tabId, url);
-      downloadsById.delete(downloadId);
+    const plan = VideoDL.buildDownloadPlan(validation.video, validation.captions);
+    if (!plannedFilenamesByTab.has(tabId)) {
+      plannedFilenamesByTab.set(tabId, new Map());
     }
-    return downloadId;
+    for (const file of plan) {
+      plannedFilenamesByTab.get(tabId).set(file.url, file.filename);
+    }
+    const results = [...validation.errors];
+    const started = await Promise.all(plan.map(async (file) => {
+      try {
+        const downloadId = await startDownload(tabId, file);
+        return { url: file.url, downloadId, filename: file.filename };
+      } catch (error) {
+        const message = error.message || "The download could not be started.";
+        markDownloadFailed(tabId, file.url, message);
+        return { url: file.url, error: message };
+      }
+    }));
+    results.push(...started);
+    return { results };
+  }
+
+  async function retryDownload(tabId, url) {
+    if (drmProtectedTabs.has(tabId)) {
+      return { error: "DRM-protected media cannot be downloaded." };
+    }
+    const candidate = mediaByTab.get(tabId) && mediaByTab.get(tabId).get(url);
+    const filename = plannedFilenamesByTab.get(tabId) && plannedFilenamesByTab.get(tabId).get(url);
+    if (!candidate || !filename) {
+      return { error: "The failed download is no longer available." };
+    }
+    if ((downloadedByTab.get(tabId) || new Set()).has(url) || activeDownloadUrls(tabId).has(url)) {
+      return { error: "This file is already downloaded or downloading." };
+    }
+    try {
+      const downloadId = await startDownload(tabId, { url, filename });
+      return { downloadId, filename };
+    } catch (error) {
+      const message = error.message || "The download could not be started.";
+      markDownloadFailed(tabId, url, message);
+      return { error: message };
+    }
   }
 
   browser.runtime.onMessage.addListener((message, sender) => {
@@ -126,25 +240,24 @@
       return getTabState(message.tabId);
     }
 
-    if (message.type === "download" && Number.isInteger(message.tabId)) {
-      return downloadCandidate(message.tabId, message.url, message.title)
-        .then((downloadId) => ({ downloadId }))
-        .catch((error) => ({ error: error.message }));
+    if (message.type === "downloadSet" && Number.isInteger(message.tabId)) {
+      return downloadSet(message.tabId, message.videoUrl, message.vttUrls)
+        .catch((error) => ({ error: error.message, results: [] }));
+    }
+
+    if (message.type === "retryDownload" && Number.isInteger(message.tabId)) {
+      return retryDownload(message.tabId, message.url);
     }
 
     return undefined;
   });
 
   browser.tabs.onRemoved.addListener((tabId) => {
-    mediaByTab.delete(tabId);
-    drmProtectedTabs.delete(tabId);
-    downloadedByTab.delete(tabId);
+    clearTabState(tabId);
   });
   browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.url || changeInfo.status === "loading") {
-      mediaByTab.delete(tabId);
-      drmProtectedTabs.delete(tabId);
-      downloadedByTab.delete(tabId);
+      clearTabState(tabId);
     }
   });
 
@@ -157,11 +270,11 @@
       markDownloaded(tracked.tabId, tracked.url);
       downloadsById.delete(delta.id);
     } else if (delta.state.current === "interrupted") {
-      browser.runtime.sendMessage({
-        type: "downloadFailed",
-        tabId: tracked.tabId,
-        url: tracked.url
-      }).catch(() => {});
+      markDownloadFailed(
+        tracked.tabId,
+        tracked.url,
+        delta.error && delta.error.current ? delta.error.current : "Download interrupted."
+      );
       downloadsById.delete(delta.id);
     }
   });
@@ -178,7 +291,20 @@
       const contentTypeHeader = (details.responseHeaders || []).find(
         (header) => header.name.toLowerCase() === "content-type"
       );
+      const contentLengthHeader = (details.responseHeaders || []).find(
+        (header) => header.name.toLowerCase() === "content-length"
+      );
+      const contentRangeHeader = (details.responseHeaders || []).find(
+        (header) => header.name.toLowerCase() === "content-range"
+      );
+      const contentDispositionHeader = (details.responseHeaders || []).find(
+        (header) => header.name.toLowerCase() === "content-disposition"
+      );
       const contentType = contentTypeHeader ? contentTypeHeader.value || "" : "";
+      const contentRangeMatch = contentRangeHeader && String(contentRangeHeader.value || "").match(/\/(\d+)$/);
+      const byteLengthValue = contentRangeMatch
+        ? Number(contentRangeMatch[1])
+        : Number(contentLengthHeader && contentLengthHeader.value);
       const isVtt = /^text\/vtt(?:;|$)/i.test(contentType) || VideoDL.isVttUrl(details.url);
       const isVideo = /^video\//i.test(contentType) || VideoDL.isMediaUrl(details.url);
       if (!isVtt && !isVideo) {
@@ -188,9 +314,12 @@
       if (!drmProtectedTabs.has(details.tabId)) {
         mergeCandidates(details.tabId, [{
           url: details.url,
-          title: isVtt ? "Detected subtitles" : "Detected video",
           type: contentType,
-          kind: isVtt ? "vtt" : "video"
+          kind: isVtt ? "vtt" : "video",
+          byteLength: Number.isFinite(byteLengthValue) && byteLengthValue >= 0 ? byteLengthValue : undefined,
+          suggestedName: VideoDL.filenameFromContentDisposition(
+            contentDispositionHeader ? contentDispositionHeader.value || "" : ""
+          )
         }]);
       }
     },

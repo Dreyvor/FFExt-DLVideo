@@ -13,6 +13,9 @@
   }
 
   function absoluteUrl(value) {
+    if (typeof value !== "string" || !value.trim()) {
+      return "";
+    }
     try {
       return new URL(value, document.baseURI).href;
     } catch (_error) {
@@ -22,10 +25,16 @@
 
   function collectMedia() {
     const results = new Map();
-    const add = (url, title, type, kind) => {
-      const absolute = absoluteUrl(url);
+    const add = (candidate) => {
+      const absolute = absoluteUrl(candidate.url);
       if (absolute && /^(?:https?|blob):/.test(absolute)) {
-        results.set(absolute, { url: absolute, title, type: type || "", kind });
+        const previous = results.get(absolute) || {};
+        results.set(absolute, {
+          ...previous,
+          ...candidate,
+          url: absolute,
+          type: candidate.type || previous.type || ""
+        });
       }
     };
 
@@ -35,21 +44,48 @@
         continue;
       }
       const title = element.getAttribute("title") || document.title || "Video";
-      add(element.currentSrc || element.src, title, element.getAttribute("type"), "video");
+      const videoMetadata = {
+        title,
+        kind: "video",
+        width: element.videoWidth || undefined,
+        height: element.videoHeight || undefined,
+        durationSeconds: Number.isFinite(element.duration) ? element.duration : undefined
+      };
+      add({
+        ...videoMetadata,
+        url: element.currentSrc || element.src,
+        type: element.getAttribute("type") || ""
+      });
       for (const source of element.querySelectorAll("source[src]")) {
-        add(source.src, title, source.type, "video");
+        add({ ...videoMetadata, url: source.src, type: source.type });
       }
       for (const track of element.querySelectorAll("track[src][kind='subtitles'], track[src][kind='captions']")) {
-        add(track.src, track.label || `${title} subtitles`, "text/vtt", "vtt");
+        add({
+          url: track.src,
+          title: track.label || `${title} subtitles`,
+          type: "text/vtt",
+          kind: "vtt",
+          language: track.srclang || "",
+          label: track.label || ""
+        });
       }
     }
 
     for (const link of document.querySelectorAll("a[href]")) {
       const title = link.textContent.trim() || document.title || "Media";
+      const suggestedName = link.getAttribute("download") || "";
       if (/\.vtt(?:$|[?#])/i.test(link.href)) {
-        add(link.href, title, "text/vtt", "vtt");
+        add({
+          url: link.href,
+          title,
+          type: "text/vtt",
+          kind: "vtt",
+          language: link.hreflang || "",
+          label: link.textContent.trim(),
+          suggestedName
+        });
       } else if (link.hasAttribute("download") || /\.(?:mp4|m4v|webm|mov|mkv|m3u8|mpd|ogv)(?:$|[?#])/i.test(link.href)) {
-        add(link.href, title, "", "video");
+        add({ url: link.href, title, type: "", kind: "video", suggestedName });
       }
     }
 
@@ -88,5 +124,7 @@
   });
   document.addEventListener("encrypted", reportDrm, true);
   document.addEventListener("webkitneedkey", reportDrm, true);
+  document.addEventListener("loadedmetadata", scheduleScan, true);
+  document.addEventListener("durationchange", scheduleScan, true);
   scan();
 })();

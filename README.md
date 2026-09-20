@@ -4,6 +4,12 @@
 
 VideoDL discovers video elements, direct video links, WebVTT subtitle tracks, and media network responses on websites. The popup separates videos and `.vtt` files into two tabs so each item can be downloaded independently. Completed downloads remain highlighted in green while the source page stays open.
 
+## Smart download sets
+
+The popup shows available resolution, duration, file size, media type, and subtitle language when a website provides that metadata. Select one video in the **Videos** tab, optionally select one or more caption tracks in the **.vtt files** tab, and choose **Download selected**.
+
+The files are saved without additional prompts under `Downloads/VideoDL/<video name>/`. Captions use the video name plus their language code (or a numeric fallback), and Firefox automatically chooses a unique name if a file already exists. Blue rows are downloading, green rows are complete, and failed files can be retried individually.
+
 ## Site access and DRM
 
 VideoDL runs on any normal website that Firefox allows extensions to access. There is no domain allowlist or hostname-hash configuration.
