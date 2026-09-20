@@ -1,0 +1,79 @@
+name: Build and release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checks
+        run: |
+          npm test
+          npm run lint
+
+      - name: Build extension
+        run: npm run build
+
+      - name: Prepare dated release assets
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_date="$(date -u +%Y-%m-%d)"
+          build_stamp="$(date -u +%Y%m%d-%H%M%S)"
+          source_archive="$(find web-ext-artifacts -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          if [[ -z "$source_archive" ]]; then
+            echo "No extension ZIP was produced." >&2
+            exit 1
+          fi
+
+          mkdir release-assets
+          archive_name="videodl-${build_stamp}.zip"
+          cp "$source_archive" "release-assets/$archive_name"
+          (
+            cd release-assets
+            sha256sum "$archive_name" > "$archive_name.sha256"
+          )
+
+          tag="build-${build_stamp}"
+          title="VideoDL build ${build_date} (${build_stamp:9:2}:${build_stamp:11:2}:${build_stamp:13:2} UTC)"
+          checksum="$(cat "release-assets/$archive_name.sha256")"
+
+          {
+            echo "Automated VideoDL build created on ${build_date} UTC."
+            echo
+            echo "SHA-256:"
+            echo '```text'
+            echo "$checksum"
+            echo '```'
+          } > release-notes.md
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.release.outputs.tag }}" \
+            release-assets/*.zip \
+            release-assets/*.sha256 \
+            --target "${{ github.sha }}" \
+            --title "${{ steps.release.outputs.title }}" \
+            --notes-file release-notes.md

@@ -1,0 +1,13 @@
+{
+  "name": "videodl-firefox-extension",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "web-ext build --overwrite-dest --ignore-files package.json package-lock.json README.md tests/**",
+    "test": "node --test",
+    "lint": "web-ext lint"
+  },
+  "devDependencies": {
+    "web-ext": "^10.6.0"
+  }
+}
